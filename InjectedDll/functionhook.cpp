@@ -20,7 +20,7 @@ private:
 	};
 
 public:
-	void* allocateNearTo(void* address, size_t size, size_t maxDistance = 0x10000000u);
+	void* allocateNearTo(void* address, size_t size, std::ptrdiff_t maxDistance = 0x70000000u);
 
 	static JumpTableManager instance;
 
@@ -30,19 +30,21 @@ private:
 
 JumpTableManager JumpTableManager::instance;
 
-void* JumpTableManager::allocateNearTo(void* address, size_t size, size_t maxDistance)
+void* JumpTableManager::allocateNearTo(void* address, size_t size, std::ptrdiff_t maxDistance)
 {
 	size += (0 - size) & 7;
+
+	const auto minAddress = (char*)address - maxDistance;
 
 	SYSTEM_INFO sysInfo;
 	GetSystemInfo(&sysInfo);
 	if (size > sysInfo.dwPageSize)
 		throw std::runtime_error("cannot allocate region larger than page size.");
 
-	auto iter = allocatedRegions_.upper_bound(address);
+	auto iter = allocatedRegions_.upper_bound(minAddress);
 	while (iter != allocatedRegions_.end())
 	{
-		if (reinterpret_cast<std::uintptr_t>(iter->first) - reinterpret_cast<std::uintptr_t>(address) > maxDistance)
+		if (std::ptrdiff_t(reinterpret_cast<std::uintptr_t>(iter->first) - reinterpret_cast<std::uintptr_t>(address)) > maxDistance)
 			break;
 
 		if (iter->second.allocPos + size <= iter->second.size)
@@ -53,37 +55,32 @@ void* JumpTableManager::allocateNearTo(void* address, size_t size, size_t maxDis
 		}
 
 		allocatedRegions_.erase(iter);
-		iter = allocatedRegions_.upper_bound(address);
+		iter = allocatedRegions_.upper_bound(minAddress);
 	}
 
 	// Search for free region
 	Log::write(std::format("Searching free page near {:p}", address));
 
-	auto searchLocation = reinterpret_cast<std::uintptr_t>(address);
+	auto searchLocation = reinterpret_cast<std::uintptr_t>(minAddress);
 	searchLocation &= ~std::uintptr_t(sysInfo.dwPageSize - 1);
 	searchLocation += sysInfo.dwPageSize;
 
 	for (;;)
 	{
-		if (searchLocation - reinterpret_cast<std::uintptr_t>(address) >= maxDistance)
+		if (std::ptrdiff_t(searchLocation - reinterpret_cast<std::uintptr_t>(address)) >= maxDistance)
 		{
-			Log::write("Failed to find a free page");
 			throw std::runtime_error("failed to find a free page near requested address.");
 		}
 
 		MEMORY_BASIC_INFORMATION memInfo;
 		std::memset(&memInfo, 0, sizeof(memInfo));
 		
-		if (VirtualQuery(
+		const auto virtualQueryRes = VirtualQuery(
 			reinterpret_cast<void*>(searchLocation),
 			&memInfo,
-			sysInfo.dwPageSize) != sizeof(memInfo))
-		{
-			searchLocation += sysInfo.dwPageSize;
-			continue;
-		}
+			sysInfo.dwPageSize);
 
-		if (memInfo.State & MEM_FREE)
+		if (virtualQueryRes != sizeof(memInfo) || (memInfo.State & MEM_FREE))
 		{
 			if (VirtualAlloc(reinterpret_cast<void*>(searchLocation), sysInfo.dwPageSize, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE))
 				break;
