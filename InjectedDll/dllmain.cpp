@@ -5,13 +5,54 @@
 #include "log.h"
 
 #include <WinSock2.h>
+#include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <format>
 #include <mutex>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+
+inline bool isPrintable(char c)
+{
+    return c >= 0x20 && c < 0x7F;
+}
+
+void dumpBinary(const std::string& tag, const void* data, size_t len)
+{
+    std::ostringstream ss;
+    ss << tag << "\n";
+    for (size_t blockStart = 0; blockStart < len; blockStart += 16)
+    {
+        ss << "    ";
+        for (size_t i = 0; i < 16; ++i)
+        {
+            if (blockStart + i < len)
+            {
+                ss << std::format("{:02X} ", ((const std::uint8_t*)data)[blockStart + i]);
+            }
+            else
+                ss << "   ";
+        }
+
+        for (size_t i = 0; i < 16; ++i)
+        {
+            if (blockStart + i < len)
+            {
+                char c = ((const char*)data)[blockStart + i];
+                ss.put(isPrintable(c) ? c : '.');
+            }
+            else
+                ss.put(' ');
+        }
+
+        ss << "\n";
+    }
+
+    Log::write(ss.str());
+}
 
 struct SSL_CTX;
 struct SSL;
@@ -20,6 +61,7 @@ struct BIO;
 
 ConcurrentMap<SOCKET, std::string> g_socketEndpoints;
 ConcurrentMap<BIO*, std::string> g_bioEndpoints;
+ConcurrentMap<SSL*, std::string> g_sslEndpoints;
 
 int (WSAAPI *original_connect)(SOCKET s, const struct sockaddr* name, int namelen);
 int WSAAPI hooked_connect(SOCKET s, const struct sockaddr* name, int namelen)
@@ -80,19 +122,74 @@ void hooked_SSL_set_bio(SSL* ssl, BIO* rbio, BIO* wbio)
 {
     Log::write("SSL_set_bio()");
 
+    std::string endpoint;
+    if (g_bioEndpoints.lookup(rbio, endpoint))
+        g_sslEndpoints.add(ssl, endpoint);
+
     return (*original_SSL_set_bio)(ssl, rbio, wbio);
 }
 
-int (*original_SSL_write_ex)(SSL* s, const void* buf, size_t num, size_t* written);
-int hooked_SSL_write_ex(SSL* s, const void* buf, size_t num, size_t* written)
+void (*original_SSL_free)(SSL* ssl);
+void hooked_SSL_free(SSL* ssl)
 {
-    return (*original_SSL_write_ex)(s, buf, num, written);
+    g_sslEndpoints.remove(ssl);
+    return (*original_SSL_free)(ssl);
+}
+
+int (*original_SSL_read)(SSL* ssl, void* buf, int num);
+int hooked_SSL_read(SSL* ssl, void* buf, int num)
+{
+    int res = (*original_SSL_read)(ssl, buf, num);
+    if (res > 0)
+    {
+        std::string endpoint;
+        if (g_sslEndpoints.lookup(ssl, endpoint))
+            dumpBinary(endpoint + " READ", buf, res);
+    }
+
+    return res;
+}
+
+int (*original_SSL_read_ex)(SSL* ssl, void* buf, size_t num, size_t* readbytes);
+int hooked_SSL_read_ex(SSL* ssl, void* buf, size_t num, size_t* readbytes)
+{
+    int res = (*original_SSL_read_ex)(ssl, buf, num, readbytes);
+    if (res > 0)
+    {
+        std::string endpoint;
+        if (g_sslEndpoints.lookup(ssl, endpoint))
+            dumpBinary(endpoint + " READ", buf, *readbytes);
+    }
+
+    return res;
 }
 
 int (*original_SSL_write)(SSL* ssl, const void* buf, int num);
 int hooked_SSL_write(SSL* ssl, const void* buf, int num)
 {
-    return (*original_SSL_write)(ssl, buf, num);
+    int res = (*original_SSL_write)(ssl, buf, num);
+    if (res > 0)
+    {
+        std::string endpoint;
+        if (g_sslEndpoints.lookup(ssl, endpoint))
+            dumpBinary(endpoint + " WRITE", buf, res);
+    }
+
+    return res;
+}
+
+int (*original_SSL_write_ex)(SSL* ssl, const void* buf, size_t num, size_t* written);
+int hooked_SSL_write_ex(SSL* ssl, const void* buf, size_t num, size_t* written)
+{
+    int res = (*original_SSL_write_ex)(ssl, buf, num, written);
+    if (res > 0)
+    {
+        std::string endpoint;
+        if (g_sslEndpoints.lookup(ssl, endpoint))
+            dumpBinary(endpoint + " WRITE", buf, *written);
+    }
+
+    return res;
 }
 
 BIO* (*original_BIO_new_connect)(const char* name);
@@ -160,9 +257,14 @@ void initializeDll()
         if (!sslModule)
             throw std::runtime_error("failed to get handle to libssl module.");
 
-        original_SSL_CTX_new    = setupFunctionHook((void*)GetProcAddress(sslModule, "SSL_CTX_new"), hooked_SSL_CTX_new);
-        original_SSL_set_fd     = setupFunctionHook((void*)GetProcAddress(sslModule, "SSL_set_fd"), hooked_SSL_set_fd);
-        original_SSL_set_bio    = setupFunctionHook((void*)GetProcAddress(sslModule, "SSL_set_bio"), hooked_SSL_set_bio);
+        original_SSL_CTX_new    = setupFunctionHook((void*)GetProcAddress(sslModule, "SSL_CTX_new" ), hooked_SSL_CTX_new );
+        original_SSL_set_fd     = setupFunctionHook((void*)GetProcAddress(sslModule, "SSL_set_fd"  ), hooked_SSL_set_fd  );
+        original_SSL_set_bio    = setupFunctionHook((void*)GetProcAddress(sslModule, "SSL_set_bio" ), hooked_SSL_set_bio );
+        original_SSL_read       = setupFunctionHook((void*)GetProcAddress(sslModule, "SSL_read"    ), hooked_SSL_read    );
+        original_SSL_read_ex    = setupFunctionHook((void*)GetProcAddress(sslModule, "SSL_read_ex" ), hooked_SSL_read_ex );
+        original_SSL_write      = setupFunctionHook((void*)GetProcAddress(sslModule, "SSL_write"   ), hooked_SSL_write   );
+        original_SSL_write_ex   = setupFunctionHook((void*)GetProcAddress(sslModule, "SSL_write_ex"), hooked_SSL_write_ex);
+        original_SSL_free       = setupFunctionHook((void*)GetProcAddress(sslModule, "SSL_free"    ), hooked_SSL_free    );
     }
     catch (std::exception& ex)
     {
