@@ -144,7 +144,7 @@ int hooked_SSL_read(SSL* ssl, void* buf, int num)
     {
         std::string endpoint;
         if (g_sslEndpoints.lookup(ssl, endpoint))
-            dumpBinary(endpoint + " READ", buf, res);
+            dumpBinary(std::format("{} READ {:p}", endpoint, (void*)ssl), buf, res);
     }
 
     return res;
@@ -158,7 +158,7 @@ int hooked_SSL_read_ex(SSL* ssl, void* buf, size_t num, size_t* readbytes)
     {
         std::string endpoint;
         if (g_sslEndpoints.lookup(ssl, endpoint))
-            dumpBinary(endpoint + " READ", buf, *readbytes);
+            dumpBinary(std::format("{} READ {:p}", endpoint, (void*)ssl), buf, *readbytes);
     }
 
     return res;
@@ -172,7 +172,7 @@ int hooked_SSL_write(SSL* ssl, const void* buf, int num)
     {
         std::string endpoint;
         if (g_sslEndpoints.lookup(ssl, endpoint))
-            dumpBinary(endpoint + " WRITE", buf, res);
+            dumpBinary(std::format("{} WRITE {:p}", endpoint, (void*)ssl), buf, res);
     }
 
     return res;
@@ -186,7 +186,7 @@ int hooked_SSL_write_ex(SSL* ssl, const void* buf, size_t num, size_t* written)
     {
         std::string endpoint;
         if (g_sslEndpoints.lookup(ssl, endpoint))
-            dumpBinary(endpoint + " WRITE", buf, *written);
+            dumpBinary(std::format("{} WRITE {:p}", endpoint, (void*)ssl), buf, *written);
     }
 
     return res;
